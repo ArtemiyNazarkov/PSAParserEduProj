@@ -7,6 +7,7 @@
 #include <cctype>
 #include <clocale>
 #include <windows.h>
+#include <sqlite3.h>
 
 // структуры
 
@@ -26,17 +27,20 @@ struct GeneralRecord {
     std::string status; // статус/сообщение об ошибке
 };
 
+// глобальный указатель на БД
+sqlite3* db = nullptr;
+
 // функции для парсинга
 
 // удалить пробелы, табуляции, переносы строк в начале и конце строки
 std::string trim(const std::string& s) {
     size_t start = s.find_first_not_of(" \t\r\n"); // искать первый символ не из набора \t\r\n
     if (start == std::string::npos) return ""; // строка состоит только из пробелов
-    size_t end = s.find_last_not_of(" \t\r\n"); //последний
-    return s.substr(start, end - start + 1); //вырезать часть строки от start до end включительно
+    size_t end = s.find_last_not_of(" \t\r\n"); // последний символ не из набора
+    return s.substr(start, end - start + 1); // вырезать часть строки от start до end включительно
 }
 
-// оставить только печатные символы (коды 32-126)  необходимо для general файла
+// оставить только печатные символы (коды 32-126) необходимо для general файла
 // удалить управляющие символы, BOM, русские буквы и т.д.
 std::string cleanString(const std::string& s) {
     std::string result;
@@ -59,7 +63,7 @@ int extractNumber(const std::string& s) {
     }
     if (digits.empty()) return -1;
     try {
-        return std::stoi(digits); // stoi = string to int необходимо для нормального парсинга времени и general-числа 
+        return std::stoi(digits); // stoi = string to int необходимо для нормального парсинга времени и general-числа
     } catch (...) {
         return -1; // если преобразование не удалось (например, число слишком большое)
     }
@@ -72,7 +76,7 @@ std::string getFileName(const std::string& path) {
     if (pos != std::string::npos) {
         return path.substr(pos + 1); // +1 чтобы пропустить сам разделитель
     }
-    return path;// если разделителей нет - вернуть исходную строку
+    return path; // если разделителей нет - вернуть исходную строку
 }
 
 // извлечь расширение файла из пути
@@ -89,8 +93,8 @@ std::string getFileExt(const std::string& path) {
 
 // извлечь час из временной метки
 int extractHour(const std::string& timeStr) {
-    if (timeStr.length() < 13) return -1;   // слишком короткая строка
-    size_t spacePos = timeStr.find(' ');     // искать пробел между датой и временем
+    if (timeStr.length() < 13) return -1; // слишком короткая строка
+    size_t spacePos = timeStr.find(' '); // искать пробел между датой и временем
     if (spacePos == std::string::npos) return -1;
     std::string hourStr = timeStr.substr(spacePos + 1, 2); // надо взять 2 символа после пробела (часы)
     return extractNumber(hourStr);
@@ -107,19 +111,115 @@ std::wstring utf8ToWide(const std::string& s) {
     return result;
 }
 
+// работа с БД
+
+// инициализация БД и создание таблиц
+bool initDatabase() {
+    int rc = sqlite3_open("pca_analysis.db", &db);
+    if (rc != SQLITE_OK) {
+        std::wcerr << L"не удалось открыть бд: " << utf8ToWide(sqlite3_errmsg(db)) << std::endl;
+        return false;
+    }
+    
+    // таблица для launch записей
+    const char* sqlLaunch = "create table if not exists launches(id integer primary key autoincrement,program_path text not null,program_name text,launch_time text,hour integer);";
+    
+    // таблица для general записей
+    const char* sqlGeneral = "create table if not exists general_events(id integer primary key autoincrement,event_time text,event_type integer,program_path text,program_name text,publisher text,version text,hash text,status text,hour integer);";
+    
+    char* errMsg = nullptr;
+    
+    rc = sqlite3_exec(db, sqlLaunch, nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        std::wcerr << L"ошибка создания таблицы launches: " << utf8ToWide(errMsg) << std::endl;
+        sqlite3_free(errMsg);
+        return false;
+    }
+    
+    rc = sqlite3_exec(db, sqlGeneral, nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        std::wcerr << L"ошибка создания таблицы general_events: " << utf8ToWide(errMsg) << std::endl;
+        sqlite3_free(errMsg);
+        return false;
+    }
+    
+    // очистить старые данные перед загрузкой новых (чтобы не дублировать при повторных запусках)
+    rc = sqlite3_exec(db, "delete from launches;", nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        std::wcerr << L"ошибка очистки таблицы launches: " << utf8ToWide(errMsg) << std::endl;
+        sqlite3_free(errMsg);
+        return false;
+    }
+    
+    rc = sqlite3_exec(db, "delete from general_events;", nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        std::wcerr << L"ошибка очистки таблицы general_events: " << utf8ToWide(errMsg) << std::endl;
+        sqlite3_free(errMsg);
+        return false;
+    }
+    
+    return true;
+}
+
+// вставка записи из PcaAppLaunchDic.txt
+void insertLaunchRecord(const LaunchRecord& rec) {
+    const char* sql = "insert into launches(program_path,program_name,launch_time,hour) values(?,?,?,?);";
+    
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    
+    sqlite3_bind_text(stmt, 1, rec.path.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, getFileName(rec.path).c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, rec.time.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 4, extractHour(rec.time));
+    
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+// вставка записи из PcaGeneralDb.txt
+void insertGeneralRecord(const GeneralRecord& rec) {
+    const char* sql = "insert into general_events(event_time,event_type,program_path,program_name,publisher,version,hash,status,hour) values(?,?,?,?,?,?,?,?,?);";
+    
+    sqlite3_stmt* stmt;
+    sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    
+    sqlite3_bind_text(stmt, 1, rec.time.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, rec.type);
+    sqlite3_bind_text(stmt, 3, rec.path.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, rec.name.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, rec.publisher.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 6, rec.version.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 7, rec.hash.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 8, rec.status.c_str(), -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 9, extractHour(rec.time));
+    
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+// закрытие БД
+void closeDatabase() {
+    if (db) {
+        sqlite3_close(db);
+        db = nullptr;
+    }
+}
+
 // парсинг PcaAppLaunchDic.txt
 // формат строки: путь|время
 
-std::vector<LaunchRecord> parseLaunchFile(const std::string& filename) {
-    std::vector<LaunchRecord> records;
+void parseLaunchFile(const std::string& filename) {
     std::ifstream file(filename);
     
     if (!file.is_open()) {
         std::wcerr << L"не удалось открыть: " << utf8ToWide(filename) << std::endl;
-        return records;
+        return;
     }
     
     std::string line;
+    int count = 0;
+    
     while (std::getline(file, line)) {
         if (line.empty()) continue;
         
@@ -131,37 +231,38 @@ std::vector<LaunchRecord> parseLaunchFile(const std::string& filename) {
                 fields.push_back(current); // сохранить текущее поле
                 current.clear(); // и очистить для следующего
             } else {
-                current += c; // добавить разделитель к текущему полю
+                current += c; // добавить символ к текущему полю
             }
         }
         if (!current.empty()) fields.push_back(current); // последнее поле
         
         if (fields.size() >= 2) {
             LaunchRecord rec;
-            rec.path = trim(fields[0]);
-            rec.time = trim(fields[1]);
+            rec.path = trim(fields[0]); // путь
+            rec.time = trim(fields[1]); // время
             if (!rec.path.empty()) {
-                records.push_back(rec);
+                insertLaunchRecord(rec);
+                count++;
             }
         }
     }
     
-    std::wcout << L"загружено из " << utf8ToWide(filename) << L": " << records.size() << L" записей" << std::endl;
-    return records;
+    std::wcout << L"загружено из " << utf8ToWide(filename) << L": " << count << L" записей" << std::endl;
 }
 
 // парсинг PcaGeneralDb.txt
 // формат строки: время|тип|путь|имя|издатель|версия|хэш|статус
 
-std::vector<GeneralRecord> parseGeneralFile(const std::string& filename) {
-    std::vector<GeneralRecord> records;
+void parseGeneralFile(const std::string& filename) {
     std::ifstream file(filename);
     
     if (!file.is_open()) {
-        return records;
+        return;
     }
     
     std::string line;
+    int count = 0;
+    
     while (std::getline(file, line)) {
         // сначала очистить строку от непечатных символов (нужно для general)
         std::string clean = cleanString(line);
@@ -188,104 +289,140 @@ std::vector<GeneralRecord> parseGeneralFile(const std::string& filename) {
             rec.name = fields[3]; // имя программы
             rec.publisher = fields[4]; // издатель
             rec.version = fields[5]; // версия
-            rec.hash = fields[6];// хэш
+            rec.hash = fields[6]; // хэш
             rec.status = fields[7]; // статус
             
             // сохранить только подходящие записи (тип определён, имя не пустое)
             if (rec.type >= 0 && !rec.name.empty()) {
-                records.push_back(rec);
+                insertGeneralRecord(rec);
+                count++;
             }
         }
     }
     
-    std::wcout << L"загружено из " << utf8ToWide(filename) << L": " << records.size() << L" записей" << std::endl;
-    return records;
+    std::wcout << L"загружено из " << utf8ToWide(filename) << L": " << count << L" записей" << std::endl;
 }
 
-// статистика
+//  статистика из БД
 
-void printStatistics(const std::vector<LaunchRecord>& launches, const std::vector<GeneralRecord>& generals) {
+void printStatisticsFromDB() {
     std::wcout << L"oooo" << std::endl;
     std::wcout << L"oooo" << std::endl;
     std::wcout << L"статистика" << std::endl;
     
-    // общее количество запускавшихся программ (уникальные)
-    std::map<std::string, int> uniquePrograms;
-    for (const auto& rec : launches) {
-        uniquePrograms[getFileName(rec.path)]++;
+    sqlite3_stmt* stmt;
+    int rc;
+    
+    // общее количество уникальных программ
+    std::wcout << L"уникальных программ: ";
+    rc = sqlite3_prepare_v2(db, "select count(distinct program_path) from launches;", -1, &stmt, nullptr);
+    if (rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+        std::wcout << sqlite3_column_int(stmt, 0);
+    } else {
+        std::wcout << L"0";
     }
-    for (const auto& rec : generals) {
-        uniquePrograms[getFileName(rec.path)]++;
+    sqlite3_finalize(stmt);
+    std::wcout << std::endl;
+    
+    // общее количество записей (launches + general_events)
+    int totalLaunches = 0;
+    int totalGeneral = 0;
+    
+    rc = sqlite3_prepare_v2(db, "select count(*) from launches;", -1, &stmt, nullptr);
+    if (rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+        totalLaunches = sqlite3_column_int(stmt, 0);
     }
-    std::wcout << L"уникальных программ: " << uniquePrograms.size() << std::endl;
-    std::wcout << L"всего записей: " << (launches.size() + generals.size()) << std::endl;
+    sqlite3_finalize(stmt);
+    
+    rc = sqlite3_prepare_v2(db, "select count(*) from general_events;", -1, &stmt, nullptr);
+    if (rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+        totalGeneral = sqlite3_column_int(stmt, 0);
+    }
+    sqlite3_finalize(stmt);
+    
+    std::wcout << L"всего записей: " << totalLaunches << L" + " << totalGeneral 
+               << L" = " << (totalLaunches + totalGeneral) << std::endl;
     
     // топ-5 самых часто запускаемых программ
-    std::vector<std::pair<std::string, int>> sortedPrograms(uniquePrograms.begin(), uniquePrograms.end());
-    std::sort(sortedPrograms.begin(), sortedPrograms.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
-    
     std::wcout << L"топ-5 самых часто запускаемых программ:" << std::endl;
-    for (size_t i = 0; i < std::min(sortedPrograms.size(), (size_t)5); i++) {
-        std::wcout << L"   " << i+1 << L". " << utf8ToWide(sortedPrograms[i].first) << L" (" << sortedPrograms[i].second << L" запусков)" << std::endl;
-    }
-    
-    // топ-5 самых часто используемых путей
-    std::map<std::string, int> pathCount;
-    for (const auto& rec : launches) {
-        size_t pos = rec.path.find_last_of("\\/");
-        std::string dir = (pos != std::string::npos) ? rec.path.substr(0, pos) : rec.path;
-        pathCount[dir]++;
-    }
-    
-    std::vector<std::pair<std::string, int>> sortedPaths(pathCount.begin(), pathCount.end());
-    std::sort(sortedPaths.begin(), sortedPaths.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
-    
-    std::wcout << L"топ-5 самых часто используемых путей:" << std::endl;
-    for (size_t i = 0; i < std::min(sortedPaths.size(), (size_t)5); i++) {
-        std::wcout << L"   " << i+1 << L". " << utf8ToWide(sortedPaths[i].first) << std::endl;
-    }
-    
-    // количество записей по типам (из GeneralDb)
-    int type0 = 0, type1 = 0, type2 = 0, type3 = 0;
-    for (const auto& rec : generals) {
-        switch(rec.type) {
-            case 0: type0++; break;
-            case 1: type1++; break;
-            case 2: type2++; break;
-            case 3: type3++; break;
+    rc = sqlite3_prepare_v2(db, "select program_name,count(*) as cnt from general_events where program_name is not null and program_name != '' group by program_name order by cnt desc limit 5;", -1, &stmt, nullptr);
+    if (rc == SQLITE_OK) {
+        int rank = 1;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* name = (const char*)sqlite3_column_text(stmt, 0);
+            int cnt = sqlite3_column_int(stmt, 1);
+            std::wcout << rank++ << L". " << utf8ToWide(name ? name : "?") << L" (" << cnt << L" запусков)" << std::endl;
         }
     }
+    sqlite3_finalize(stmt);
     
-    std::wcout << L"записи по типам (PcaGeneralDb):" << std::endl;
-    std::wcout << L"type 0 (installer): " << type0 << std::endl;
-    std::wcout << L"type 1 (driverblocked): " << type1 << std::endl;
-    std::wcout << L"type 2 (abnormalexit): " << type2 << std::endl;
-    std::wcout << L"type 3 (compatissue): " << type3 << std::endl;
-    
-    std::map<std::string, int> extCount;
-    for (const auto& rec : launches) {
-        extCount[getFileExt(rec.path)]++;
+    // топ-5 самых часто используемых путей
+    std::wcout << L"топ-5 самых часто используемых путей:" << std::endl;
+    rc = sqlite3_prepare_v2(db, "select program_path,count(*) as cnt from launches group by program_path order by cnt desc limit 5;", -1, &stmt, nullptr);
+    if (rc == SQLITE_OK) {
+        int rank = 1;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* path = (const char*)sqlite3_column_text(stmt, 0);
+            std::wcout << rank++ << L". " << utf8ToWide(path ? path : "?") << std::endl;
+        }
     }
+    sqlite3_finalize(stmt);
     
+    // количество записей по типам (из GeneralDb)
+    std::wcout << L"записи по типам (pcageneraldb):" << std::endl;
+    rc = sqlite3_prepare_v2(db, "select event_type,count(*) from general_events group by event_type order by event_type;", -1, &stmt, nullptr);
+    if (rc == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int type = sqlite3_column_int(stmt, 0);
+            int cnt = sqlite3_column_int(stmt, 1);
+            std::wstring typeName;
+            switch(type) {
+                case 0: typeName = L"installer"; break;
+                case 1: typeName = L"driverblocked"; break;
+                case 2: typeName = L"abnormalexit"; break;
+                case 3: typeName = L"compatissue"; break;
+                default: typeName = L"unknown";
+            }
+            std::wcout << L"type " << type << L" (" << typeName << L"): " << cnt << std::endl;
+        }
+    }
+    sqlite3_finalize(stmt);
+    
+    // статистика по расширениям файлов
     std::wcout << L"статистика по расширениям файлов:" << std::endl;
-    for (const auto& pair : extCount) {
-        std::wcout << L"   ." << utf8ToWide(pair.first) << L": " << pair.second << L" записей" << std::endl;
+    rc = sqlite3_prepare_v2(db, "select program_path from launches;", -1, &stmt, nullptr);
+    if (rc == SQLITE_OK) {
+        std::map<std::string, int> extCount;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const char* path = (const char*)sqlite3_column_text(stmt, 0);
+            if (path) {
+                extCount[getFileExt(std::string(path))]++;
+            }
+        }
+        for (const auto& pair : extCount) {
+            std::wcout << L"." << utf8ToWide(pair.first) << L": " << pair.second << L" записей" << std::endl;
+        }
     }
+    sqlite3_finalize(stmt);
     
-    std::map<int, int> hourActivity;
-    for (const auto& rec : launches) {
-        int hour = extractHour(rec.time);
-        if (hour >= 0) hourActivity[hour]++;
-    }
-    for (const auto& rec : generals) {
-        int hour = extractHour(rec.time);
-        if (hour >= 0) hourActivity[hour]++;
-    }
-    
+    // временная шкала активности (по часам) из launches
     std::wcout << L"временная шкала активности (по часам):" << std::endl;
-    for (const auto& pair : hourActivity) {
-        std::wcout << L"   " << pair.first << L":00 - " << pair.second << L" событий" << std::endl;
+    rc = sqlite3_prepare_v2(db, "select hour,count(*) from launches where hour>=0 group by hour order by hour;", -1, &stmt, nullptr);
+    if (rc == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::wcout << sqlite3_column_int(stmt, 0) << L":00 - " << sqlite3_column_int(stmt, 1) << L" событий" << std::endl;
+        }
     }
+    sqlite3_finalize(stmt);
+    
+    // временная шкала активности (по часам) из general_events
+    rc = sqlite3_prepare_v2(db, "select hour,count(*) from general_events where hour>=0 group by hour order by hour;", -1, &stmt, nullptr);
+    if (rc == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            std::wcout << sqlite3_column_int(stmt, 0) << L":00 - " << sqlite3_column_int(stmt, 1) << L" событий (general)" << std::endl;
+        }
+    }
+    sqlite3_finalize(stmt);
     
     std::wcout << L"oooo" << std::endl;
 }
@@ -293,33 +430,28 @@ void printStatistics(const std::vector<LaunchRecord>& launches, const std::vecto
 int main() {
     SetConsoleOutputCP(1251);
     SetConsoleCP(1251); 
-    std::setlocale(LC_ALL, "Russian"); // только сетлокал не хватает на моей в данной момент машины
+    std::setlocale(LC_ALL, "Russian");
     
-    // загрузка данных
-    auto launches = parseLaunchFile("C:/Windows/appcompat/pca/PcaAppLaunchDic.txt");
-    auto generals0 = parseGeneralFile("C:/Windows/appcompat/pca/PcaGeneralDb0.txt");
-    auto generals1 = parseGeneralFile("C:/Windows/appcompat/pca/PcaGeneralDb1.txt");
+    std::wcout << L"oooo" << std::endl;
+    std::wcout << L"program compatibility assistant analyzer (with sqlite)" << std::endl;
+    std::wcout << L"oooo" << std::endl;
     
-    // объединить general записи
-    std::vector<GeneralRecord> allGenerals;
-    allGenerals.insert(allGenerals.end(), generals0.begin(), generals0.end());
-    allGenerals.insert(allGenerals.end(), generals1.begin(), generals1.end());
-    
-    // вывод первых записей
-    std::wcout << L"записи из PcaAppLaunchDic.txt" << std::endl;
-    for (size_t i = 0; i < std::min(launches.size(), (size_t)3); i++) {
-        std::wcout << L"  " << utf8ToWide(getFileName(launches[i].path)) 
-                   << L" | " << utf8ToWide(launches[i].time) << std::endl;
+    // инициализация БД
+    if (!initDatabase()) {
+        std::wcerr << L"ошибка инициализации бд" << std::endl;
+        return 1;
     }
     
-    std::wcout << L"записи из PcaGeneralDb*.txt ||*=(1,2)" << std::endl;
-    for (size_t i = 0; i < std::min(allGenerals.size(), (size_t)3); i++) {
-        std::wcout << L"  " << utf8ToWide(allGenerals[i].name)
-                    << L" | type=" << allGenerals[i].type 
-                   << L" | " << utf8ToWide(allGenerals[i].status) << std::endl;
-    }
+    // загрузка данных (сразу в БД)
+    parseLaunchFile("C:/Windows/appcompat/pca/PcaAppLaunchDic.txt");
+    parseGeneralFile("C:/Windows/appcompat/pca/PcaGeneralDb0.txt");
+    parseGeneralFile("C:/Windows/appcompat/pca/PcaGeneralDb1.txt");
     
-    // статистика
-    printStatistics(launches, allGenerals);
+    // статистика из БД
+    printStatisticsFromDB();
+    
+    // закрытие БД
+    closeDatabase();
+    
     return 0;
 }
