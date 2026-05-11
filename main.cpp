@@ -431,9 +431,6 @@ int main() {
     SetConsoleOutputCP(1251);
     SetConsoleCP(1251); 
     std::setlocale(LC_ALL, "Russian");
-    
-    std::wcout << L"oooo" << std::endl;
-    std::wcout << L"program compatibility assistant analyzer (with sqlite)" << std::endl;
     std::wcout << L"oooo" << std::endl;
     
     // инициализация БД
