@@ -70,11 +70,12 @@
 
 > ```
 > main.cpp
-> ├── структуры данных (launchrecord, generalrecord)
-> ├── функции парсинга (trim, cleanstring, extractnumber...)
-> ├── работа с бд (initdatabase, insert..., closedatabase)
-> ├── парсинг файлов (parselaunchfile, parsegeneralfile)
-> ├── статистика (printstatisticsfromdb)
+> ├── структуры данных (LaunchRecord, GeneralRecord)
+> ├── функции парсинга (trim, cleanString, extractNumber...)
+> ├── работа с бд (initDatabase, insert..., closeDatabase)
+> ├── парсинг файлов (parseLaunchFile, parseGeneralFile)
+> ├── статистика (printStatisticsFromDB)
+> ├── вывод в файл (writeToFile)
 > └── main()
 > ```
 
@@ -83,18 +84,19 @@
 | компонент | назначение |
 |-----------|------------|
 | `trim()` | удаление пробелов и табуляции в начале и конце строки |
-| `cleanstring()` | оставление только печатные ascii символы |
-| `extractnumber()` | извлечение всех цифр из строки и возврат числа |
-| `getfilename()` | извлечение имени файла из полного пути |
-| `getfileext()` | извлечение расширения файла в нижнем регистре |
-| `extracthour()` | извлечение часа из временной метки |
-| `utf8towide()` | преобразование utf-8 строки в широкую для вывода |
-| `initdatabase()` | создание бд и таблицы, чистка старых данных |
-| `insertlaunchrecord()` | вставка записей о запусках в таблицу `launches` |
-| `insertgeneralrecord()` | вставка записей об общих событиях в таблицу `general_events` |
-| `parselaunchfile()` | парсинг `pcaapplaunchdic.txt` и вставка записи в бд |
-| `parsegeneralfile()` | парсинг `pcageneraldb*.txt` и вставка записи в бд |
-| `printstatisticsfromdb()` | выполнение sql-запросов и вывод статистику |
+| `cleanString()` | оставление только печатных ascii символов |
+| `extractNumber()` | извлечение всех цифр из строки и возврат числа |
+| `getFileName()` | извлечение имени файла из полного пути |
+| `getFileExt()` | извлечение расширения файла в нижнем регистре |
+| `extractHour()` | извлечение часа из временной метки |
+| `utf8ToWide()` | преобразование utf-8 строки в широкую для вывода |
+| `writeToFile()` | запись строки в файл `output.txt` в кодировке utf-8 |
+| `initDatabase()` | создание бд и таблиц (`launches`, `general_events`, `event_types`), очистка старых данных |
+| `insertLaunchRecord()` | вставка записей о запусках в таблицу `launches` |
+| `insertGeneralRecord()` | вставка записей об общих событиях в таблицу `general_events` |
+| `parseLaunchFile()` | парсинг `PcaAppLaunchDic.txt` и вставка записей в бд |
+| `parseGeneralFile()` | парсинг `PcaGeneralDb*.txt` и вставка записей в бд |
+| `printStatisticsFromDB()` | выполнение sql-запросов и вывод статистики (в консоль и файл) |
 
 ### 2.3 схема базы данных
 
@@ -127,6 +129,25 @@
 > );
 > ```
 
+**таблица `event_types` (фиксированная):**
+
+> ```sql
+> create table event_types (
+>     type_code integer primary key,
+>     type_name text,
+>     description text
+> );
+> ```
+
+таблица заполняется следующими данными:
+
+| type_code | type_name | description |
+|-----------|-----------|-------------|
+| 0 | installer | установщик завершился с ошибкой или был прерван |
+| 1 | driverblocked | драйвер заблокирован (hvci/cet) |
+| 2 | abnormalexit | программа завершилась аномально |
+| 3 | compatissue | обнаружена проблема совместимости |
+
 ---
 
 ## 3. Краткое руководство по использованию
@@ -139,7 +160,7 @@
 - права доступа: чтение `C:\Windows\appcompat\pca\*`
 
 ### 3.2 сборка (cmake)
-
+используя MSYS2 MinGW64
 > ```bash 
 > cd *папка проекта*
 > mkdir build
@@ -156,7 +177,7 @@
 
 ### 3.4 вывод программы
 
-программа выводит:
+программа выводит в консоль и одновременно сохраняет в файл `build\output.txt`:
 
 - количество загруженных записей из каждого файла
 - количество уникальных программ
@@ -175,9 +196,9 @@
 
 - ос: windows 11 (виртуальная машина)
 - компилятор: gcc 16.1.0 (mingw64)
-- данные: файлы из `c:\windows\appcompat\pca\`
+- данные: файлы из `C:\Windows\appcompat\pca\`
 
-**пример вывода:**
+**пример вывода (консоль / `build\output.txt`):**
 
 > ```
 > oooo
@@ -199,7 +220,7 @@
 > 3. C:\Program Files\WindowsApps\Microsoft.WindowsNotepad_11.2501.31.0_x64__8wekyb3d8bbwe\Notepad\Notepad.exe
 > 4. C:\Program Files\WindowsApps\Microsoft.Paint_11.2412.295.0_x64__8wekyb3d8bbwe\PaintApp\mspaint.exe
 > 5. C:\Program Files\Notepad++\notepad++.exe
-> записи по типам (pcageneraldb):
+> записи по типам (PcaGeneralDb):
 > type 0 (installer): 4
 > type 2 (abnormalexit): 2
 > статистика по расширениям файлов:
@@ -222,12 +243,12 @@
 
 1. анализирует структуру файлов `PcaAppLaunchDic.txt` и `PcaGeneralDb*.txt`
 2. парсит строки с учётом разделителя `|` и обработкой ошибок
-3. сохраняет данные в базу sqlite
-4. вычисляет и выводит статистику в читаемом формате
+3. сохраняет данные в базу sqlite (включая фиксированную таблицу `event_types` с описаниями типов событий)
+4. вычисляет и выводит статистику в читаемом формате (в консоль и файл `output.txt`)
 
 **архив для сдачи включает:**
 
 - `main.cpp` — исходный код программы
-- `cmakelists.txt` — конфигурация сборки
+- `CMakeLists.txt` — конфигурация сборки
 - `отчёт.md` — данный документ
 - `output.txt` — пример вывода программы

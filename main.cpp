@@ -9,6 +9,9 @@
 #include <windows.h>
 #include <sqlite3.h>
 
+#include <codecvt> // для output.txt
+#include <locale> 
+
 // структуры
 
 struct LaunchRecord {
@@ -111,6 +114,22 @@ std::wstring utf8ToWide(const std::string& s) {
     return result;
 }
 
+
+// запись в output.txt (для корректной записи кириллицы)
+void writeToFile(const std::wstring& text) {
+    static std::ofstream file("output.txt", std::ios::app);
+    if (!file.is_open()) {
+        file.open("output.txt", std::ios::app);
+    }
+    if (file.is_open()) {
+        // преобразование из wstring в UTF-8
+        std::wstring_convert<std::codecvt_utf8<wchar_t>> converter; // конвертер для кириллицы
+        std::string utf8 = converter.to_bytes(text);
+        file << utf8;
+        file.flush();
+    }
+}
+
 // работа с БД
 
 // инициализация БД и создание таблиц
@@ -158,6 +177,32 @@ bool initDatabase() {
         return false;
     }
     
+    
+    // доработка
+    // фиксированная таблица с типами событий и их описанием по кодам
+    const char* sqlEventTypes = "create table if not exists event_types(type_code integer primary key,type_name text,description text);";
+
+    rc = sqlite3_exec(db, sqlEventTypes, nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        std::cerr << "ошибка создания таблицы event_types: " << errMsg << std::endl;
+        sqlite3_free(errMsg);
+        return false;
+    }
+
+    // заполнение таблицы данными из отчёта md
+    const char* insertTypes = 
+        "insert or ignore into event_types(type_code,type_name,description) values "
+        "(0,'installer','установщик завершился с ошибкой или был прерван'),"
+        "(1,'driverblocked','драйвер заблокирован (hvci/cet)'),"
+        "(2,'abnormalexit','программа завершилась аномально'),"
+        "(3,'compatissue','обнаружена проблема совместимости');";
+
+    rc = sqlite3_exec(db, insertTypes, nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        std::cerr << "ошибка заполнения таблицы event_types: " << errMsg << std::endl;
+        sqlite3_free(errMsg);
+        return false;
+    }
     return true;
 }
 
@@ -247,7 +292,10 @@ void parseLaunchFile(const std::string& filename) {
         }
     }
     
-    std::wcout << L"загружено из " << utf8ToWide(filename) << L": " << count << L" записей" << std::endl;
+    // для записи в файл output.txt
+    std::wstring msg = L"загружено из " + utf8ToWide(filename) + L": " + std::to_wstring(count) + L" записей\n";
+    std::wcout << msg;
+    writeToFile(msg);
 }
 
 // парсинг PcaGeneralDb.txt
@@ -300,7 +348,10 @@ void parseGeneralFile(const std::string& filename) {
         }
     }
     
-    std::wcout << L"загружено из " << utf8ToWide(filename) << L": " << count << L" записей" << std::endl;
+    // для записи в файл output.txt
+    std::wstring msg = L"загружено из " + utf8ToWide(filename) + L": " + std::to_wstring(count) + L" записей\n";
+    std::wcout << msg;
+    writeToFile(msg);
 }
 
 //  статистика из БД
@@ -309,20 +360,27 @@ void printStatisticsFromDB() {
     std::wcout << L"oooo" << std::endl;
     std::wcout << L"oooo" << std::endl;
     std::wcout << L"статистика" << std::endl;
+    writeToFile(L"oooo\n");
+    writeToFile(L"oooo\n");
+    writeToFile(L"статистика\n");
     
     sqlite3_stmt* stmt;
     int rc;
     
     // общее количество уникальных программ
     std::wcout << L"уникальных программ: ";
+    writeToFile(L"уникальных программ: ");
     rc = sqlite3_prepare_v2(db, "select count(distinct program_path) from launches;", -1, &stmt, nullptr);
     if (rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
         std::wcout << sqlite3_column_int(stmt, 0);
+        writeToFile(std::to_wstring(sqlite3_column_int(stmt, 0)));
     } else {
         std::wcout << L"0";
+        writeToFile(L"0");
     }
     sqlite3_finalize(stmt);
     std::wcout << std::endl;
+    writeToFile(L"\n");
     
     // общее количество записей (launches + general_events)
     int totalLaunches = 0;
@@ -340,36 +398,45 @@ void printStatisticsFromDB() {
     }
     sqlite3_finalize(stmt);
     
-    std::wcout << L"всего записей: " << totalLaunches << L" + " << totalGeneral 
-               << L" = " << (totalLaunches + totalGeneral) << std::endl;
+    std::wstring totalMsg = L"всего записей: " + std::to_wstring(totalLaunches) + L" + " + std::to_wstring(totalGeneral) 
+               + L" = " + std::to_wstring(totalLaunches + totalGeneral) + L"\n";
+    std::wcout << totalMsg;
+    writeToFile(totalMsg);
     
     // топ-5 самых часто запускаемых программ
     std::wcout << L"топ-5 самых часто запускаемых программ:" << std::endl;
+    writeToFile(L"топ-5 самых часто запускаемых программ:\n");
     rc = sqlite3_prepare_v2(db, "select program_name,count(*) as cnt from general_events where program_name is not null and program_name != '' group by program_name order by cnt desc limit 5;", -1, &stmt, nullptr);
     if (rc == SQLITE_OK) {
         int rank = 1;
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             const char* name = (const char*)sqlite3_column_text(stmt, 0);
             int cnt = sqlite3_column_int(stmt, 1);
-            std::wcout << rank++ << L". " << utf8ToWide(name ? name : "?") << L" (" << cnt << L" запусков)" << std::endl;
+            std::wstring line = std::to_wstring(rank++) + L". " + utf8ToWide(name ? name : "?") + L" (" + std::to_wstring(cnt) + L" запусков)\n";
+            std::wcout << line;
+            writeToFile(line);
         }
     }
     sqlite3_finalize(stmt);
     
     // топ-5 самых часто используемых путей
     std::wcout << L"топ-5 самых часто используемых путей:" << std::endl;
+    writeToFile(L"топ-5 самых часто используемых путей:\n");
     rc = sqlite3_prepare_v2(db, "select program_path,count(*) as cnt from launches group by program_path order by cnt desc limit 5;", -1, &stmt, nullptr);
     if (rc == SQLITE_OK) {
         int rank = 1;
         while (sqlite3_step(stmt) == SQLITE_ROW) {
             const char* path = (const char*)sqlite3_column_text(stmt, 0);
-            std::wcout << rank++ << L". " << utf8ToWide(path ? path : "?") << std::endl;
+            std::wstring line = std::to_wstring(rank++) + L". " + utf8ToWide(path ? path : "?") + L"\n";
+            std::wcout << line;
+            writeToFile(line);
         }
     }
     sqlite3_finalize(stmt);
     
     // количество записей по типам (из GeneralDb)
     std::wcout << L"записи по типам (pcageneraldb):" << std::endl;
+    writeToFile(L"записи по типам (pcageneraldb):\n");
     rc = sqlite3_prepare_v2(db, "select event_type,count(*) from general_events group by event_type order by event_type;", -1, &stmt, nullptr);
     if (rc == SQLITE_OK) {
         while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -383,13 +450,16 @@ void printStatisticsFromDB() {
                 case 3: typeName = L"compatissue"; break;
                 default: typeName = L"unknown";
             }
-            std::wcout << L"type " << type << L" (" << typeName << L"): " << cnt << std::endl;
+            std::wstring line = L"type " + std::to_wstring(type) + L" (" + typeName + L"): " + std::to_wstring(cnt) + L"\n";
+            std::wcout << line;
+            writeToFile(line);
         }
     }
     sqlite3_finalize(stmt);
     
     // статистика по расширениям файлов
     std::wcout << L"статистика по расширениям файлов:" << std::endl;
+    writeToFile(L"статистика по расширениям файлов:\n");
     rc = sqlite3_prepare_v2(db, "select program_path from launches;", -1, &stmt, nullptr);
     if (rc == SQLITE_OK) {
         std::map<std::string, int> extCount;
@@ -400,17 +470,22 @@ void printStatisticsFromDB() {
             }
         }
         for (const auto& pair : extCount) {
-            std::wcout << L"." << utf8ToWide(pair.first) << L": " << pair.second << L" записей" << std::endl;
+            std::wstring line = L"." + utf8ToWide(pair.first) + L": " + std::to_wstring(pair.second) + L" записей\n";
+            std::wcout << line;
+            writeToFile(line);
         }
     }
     sqlite3_finalize(stmt);
     
     // временная шкала активности (по часам) из launches
     std::wcout << L"временная шкала активности (по часам):" << std::endl;
+    writeToFile(L"временная шкала активности (по часам):\n");
     rc = sqlite3_prepare_v2(db, "select hour,count(*) from launches where hour>=0 group by hour order by hour;", -1, &stmt, nullptr);
     if (rc == SQLITE_OK) {
         while (sqlite3_step(stmt) == SQLITE_ROW) {
-            std::wcout << sqlite3_column_int(stmt, 0) << L":00 - " << sqlite3_column_int(stmt, 1) << L" событий" << std::endl;
+            std::wstring line = std::to_wstring(sqlite3_column_int(stmt, 0)) + L":00 - " + std::to_wstring(sqlite3_column_int(stmt, 1)) + L" событий\n";
+            std::wcout << line;
+            writeToFile(line);
         }
     }
     sqlite3_finalize(stmt);
@@ -419,19 +494,25 @@ void printStatisticsFromDB() {
     rc = sqlite3_prepare_v2(db, "select hour,count(*) from general_events where hour>=0 group by hour order by hour;", -1, &stmt, nullptr);
     if (rc == SQLITE_OK) {
         while (sqlite3_step(stmt) == SQLITE_ROW) {
-            std::wcout << sqlite3_column_int(stmt, 0) << L":00 - " << sqlite3_column_int(stmt, 1) << L" событий (general)" << std::endl;
+            std::wstring line = std::to_wstring(sqlite3_column_int(stmt, 0)) + L":00 - " + std::to_wstring(sqlite3_column_int(stmt, 1)) + L" событий (general)\n";
+            std::wcout << line;
+            writeToFile(line);
         }
     }
     sqlite3_finalize(stmt);
     
     std::wcout << L"oooo" << std::endl;
+    writeToFile(L"oooo\n");
 }
 
 int main() {
+    std::ofstream initFile("output.txt", std::ios::trunc);
+    initFile.close();
     SetConsoleOutputCP(1251);
     SetConsoleCP(1251); 
     std::setlocale(LC_ALL, "Russian");
     std::wcout << L"oooo" << std::endl;
+    writeToFile(L"oooo\n");
     
     // инициализация БД
     if (!initDatabase()) {
