@@ -165,7 +165,7 @@
 > cd *папка проекта*
 > mkdir build
 > cd build
-> cmake .. -g "mingw makefiles"
+> cmake .. -G "MinGW Makefiles"
 > cmake --build .
 > ```
 
