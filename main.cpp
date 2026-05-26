@@ -9,9 +9,6 @@
 #include <windows.h>
 #include <sqlite3.h>
 
-#include <codecvt> // для output.txt
-#include <locale> 
-
 // структуры
 
 struct LaunchRecord {
@@ -114,6 +111,17 @@ std::wstring utf8ToWide(const std::string& s) {
     return result;
 }
 
+// преобразование wstring в UTF-8 (для записи в файл) 
+std::string wideToUtf8(const std::wstring& wstr) {
+    if (wstr.empty()) return "";
+    
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), 
+                                          NULL, 0, NULL, NULL);
+    std::string utf8(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), 
+                        &utf8[0], size_needed, NULL, NULL);
+    return utf8;
+}
 
 // запись в output.txt (для корректной записи кириллицы)
 void writeToFile(const std::wstring& text) {
@@ -122,9 +130,7 @@ void writeToFile(const std::wstring& text) {
         file.open("output.txt", std::ios::app);
     }
     if (file.is_open()) {
-        // преобразование из wstring в UTF-8
-        std::wstring_convert<std::codecvt_utf8<wchar_t>> converter; // конвертер для кириллицы
-        std::string utf8 = converter.to_bytes(text);
+        std::string utf8 = wideToUtf8(text);
         file << utf8;
         file.flush();
     }
@@ -506,6 +512,7 @@ void printStatisticsFromDB() {
 }
 
 int main() {
+    // очистить output.txt при запуске
     std::ofstream initFile("output.txt", std::ios::trunc);
     initFile.close();
     SetConsoleOutputCP(1251);

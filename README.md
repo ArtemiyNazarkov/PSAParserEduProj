@@ -76,6 +76,7 @@
 > ├── парсинг файлов (parseLaunchFile, parseGeneralFile)
 > ├── статистика (printStatisticsFromDB)
 > ├── вывод в файл (writeToFile)
+> ├── преобразование кодировок (utf8ToWide, wideToUtf8)
 > └── main()
 > ```
 
@@ -90,6 +91,7 @@
 | `getFileExt()` | извлечение расширения файла в нижнем регистре |
 | `extractHour()` | извлечение часа из временной метки |
 | `utf8ToWide()` | преобразование utf-8 строки в широкую для вывода |
+| `wideToUtf8()` | преобразование широкой строки в utf-8 для записи в файл |
 | `writeToFile()` | запись строки в файл `output.txt` в кодировке utf-8 |
 | `initDatabase()` | создание бд и таблиц (`launches`, `general_events`, `event_types`), очистка старых данных |
 | `insertLaunchRecord()` | вставка записей о запусках в таблицу `launches` |
